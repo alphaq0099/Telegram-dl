@@ -90,7 +90,7 @@ async def download_range(client, start_link: str, end_link: str, override_types=
         
         # Download them in batches to respect concurrency limits
         sem = asyncio.Semaphore(max_concurrent)
-        batch_size = 50
+        batch_size = 100
         for i in range(0, total_found, batch_size):
             batch_messages = messages_list[i:i + batch_size]
             tqdm.write(f"\n📥 Processing batch {i // batch_size + 1} ({len(batch_messages)} files)...")

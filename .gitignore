@@ -30,3 +30,6 @@ dist/
 
 # Tests
 test.txt
+gui_debug.log
+scratch/
+test_run.log

@@ -211,7 +211,10 @@ async def get_position_manager():
 
 class TqdmDownloadProgress:
     """Helper class to track download progress using tqdm with rate limiting."""
+    gui_callback = None  # Class-level hook to receive progress updates in GUI: (filename, received, total)
+
     def __init__(self, filename, total_bytes, position=None):
+        self.filename = filename
         self.pbar = tqdm(
             total=total_bytes,
             unit='B',
@@ -236,6 +239,12 @@ class TqdmDownloadProgress:
             
             limiter = await get_rate_limiter()
             await limiter.consume(diff)
+            
+        if TqdmDownloadProgress.gui_callback:
+            try:
+                TqdmDownloadProgress.gui_callback(self.filename, received, total)
+            except Exception:
+                pass
 
     def close(self):
         self.pbar.close()
@@ -559,6 +568,13 @@ async def download_message_media(client: TelegramClient, message, chat_id, overr
                             # Update progress bar
                             progress.pbar.update(chunk_len)
                             
+                            # Trigger GUI progress callback
+                            if TqdmDownloadProgress.gui_callback:
+                                try:
+                                    TqdmDownloadProgress.gui_callback(progress.filename, progress.pbar.n, file_size)
+                                except Exception:
+                                    pass
+                                    
                             # Apply bandwidth throttling
                             if limiter:
                                 await limiter.consume(chunk_len)
