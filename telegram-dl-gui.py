@@ -24,6 +24,8 @@ from utils.parser import parse_telegram_link, resolve_chat_entity
 from modules.range import download_range
 from modules.full import download_full
 from modules.queue_manager import load_queue, save_queue
+from utils.archive import DB_PATH
+from modules.search import find_file_on_disk, open_file_folder, format_size
 
 # Setup logging to console and file
 logging.basicConfig(
@@ -189,10 +191,51 @@ async def main(page: ft.Page):
     settings_api_hash = ft.Ref[ft.TextField]()
     settings_download_dir = ft.Ref[ft.TextField]()
     settings_speed_limit = ft.Ref[ft.TextField]()
+    settings_chunk_size = ft.Ref[ft.Dropdown]()
+    settings_max_concurrent = ft.Ref[ft.TextField]()
+    settings_filename_template = ft.Ref[ft.TextField]()
+    
+    settings_min_size = ft.Ref[ft.TextField]()
+    settings_max_size = ft.Ref[ft.TextField]()
+    settings_after_date = ft.Ref[ft.TextField]()
+    settings_before_date = ft.Ref[ft.TextField]()
+    settings_filename_regex = ft.Ref[ft.TextField]()
+    settings_caption_regex = ft.Ref[ft.TextField]()
+    settings_allowed_extensions = ft.Ref[ft.TextField]()
+    
+    settings_media_photo = ft.Ref[ft.Checkbox]()
+    settings_media_video = ft.Ref[ft.Checkbox]()
+    settings_media_document = ft.Ref[ft.Checkbox]()
+    settings_media_sticker = ft.Ref[ft.Checkbox]()
+    
+    settings_monitor_date_org = ft.Ref[ft.Dropdown]()
+    settings_monitor_session_grouping = ft.Ref[ft.Checkbox]()
+    settings_monitor_session_gap = ft.Ref[ft.TextField]()
+    
+    settings_gallery_enabled = ft.Ref[ft.Checkbox]()
+    settings_cloud_enabled = ft.Ref[ft.Checkbox]()
+    settings_cloud_delete_local = ft.Ref[ft.Checkbox]()
+    settings_cloud_rclone_remote = ft.Ref[ft.TextField]()
+    settings_cloud_remote_path = ft.Ref[ft.TextField]()
+    
+    settings_mirror_enabled = ft.Ref[ft.Checkbox]()
+    settings_mirror_target = ft.Ref[ft.TextField]()
+    
     settings_status = ft.Ref[ft.Text]()
     settings_add_monitored = ft.Ref[ft.TextField]()
     settings_monitored_status = ft.Ref[ft.Text]()
     
+    # Ref handles for Statistics fields
+    stats_total_storage_text = ft.Ref[ft.Text]()
+    stats_total_files_text = ft.Ref[ft.Text]()
+    stats_avg_size_text = ft.Ref[ft.Text]()
+    stats_search_input = ft.Ref[ft.TextField]()
+    stats_results_table = ft.Ref[ft.DataTable]()
+    stats_search_button = ft.Ref[ft.IconButton]()
+    stats_status_text = ft.Ref[ft.Text]()
+    stats_breakdown_col = ft.Ref[ft.Column]()
+    stats_chats_col = ft.Ref[ft.Column]()
+    stats_largest_col = ft.Ref[ft.Column]()
     # Ref handles for Auth Onboarding fields
     auth_api_id = ft.Ref[ft.TextField]()
     auth_api_hash = ft.Ref[ft.TextField]()
@@ -1577,67 +1620,556 @@ async def main(page: ft.Page):
     # ----------------------------------------------------
     # TAB 4: History & Statistics Layout
     # ----------------------------------------------------
+    def load_statistics_data():
+        """Loads and calculates download stats from archive.db."""
+        if not os.path.exists(DB_PATH):
+            return {
+                "total_files": 0,
+                "total_size": 0,
+                "avg_size": 0,
+                "media_breakdown": [],
+                "top_chats": [],
+                "largest_files": []
+            }
+            
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        try:
+            # Create table if not exists just in case
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS archive (
+                    chat_id TEXT,
+                    message_id INTEGER,
+                    filename TEXT,
+                    file_size INTEGER,
+                    downloaded_at TEXT,
+                    chat_name TEXT,
+                    caption TEXT,
+                    media_type TEXT,
+                    PRIMARY KEY (chat_id, message_id)
+                )
+            ''')
+            
+            # 1. Overall stats
+            cursor.execute("SELECT COUNT(*), SUM(file_size) FROM archive")
+            total_files, total_size = cursor.fetchone()
+            total_files = total_files or 0
+            total_size = total_size or 0
+            avg_size = total_size / total_files if total_files > 0 else 0
+            
+            # 2. Media type breakdown
+            cursor.execute("SELECT media_type, COUNT(*), SUM(file_size) FROM archive GROUP BY media_type ORDER BY SUM(file_size) DESC")
+            media_breakdown = cursor.fetchall()
+            
+            # 3. Top 5 chats
+            cursor.execute("SELECT chat_name, COUNT(*), SUM(file_size) FROM archive GROUP BY chat_name ORDER BY SUM(file_size) DESC LIMIT 5")
+            top_chats = cursor.fetchall()
+            
+            # 4. Top 5 largest files that exist on disk
+            cursor.execute("SELECT filename, file_size, chat_name, chat_id FROM archive ORDER BY file_size DESC")
+            candidates = cursor.fetchall()
+            largest_files = []
+            for fname, size, cname, cid in candidates:
+                if len(largest_files) >= 5:
+                    break
+                path = find_file_on_disk(cid, cname, fname)
+                if path and os.path.exists(path):
+                    largest_files.append((fname, size, cname, cid))
+            
+            conn.close()
+            return {
+                "total_files": total_files,
+                "total_size": total_size,
+                "avg_size": avg_size,
+                "media_breakdown": media_breakdown,
+                "top_chats": top_chats,
+                "largest_files": largest_files
+            }
+        except Exception as ex:
+            logger.error(f"Error loading stats from database: {ex}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return {
+                "total_files": 0,
+                "total_size": 0,
+                "avg_size": 0,
+                "media_breakdown": [],
+                "top_chats": [],
+                "largest_files": []
+            }
+
+    async def handle_stats_search(e=None):
+        """Searches the download archive database and updates the DataTable."""
+        if not stats_search_input.current or not stats_results_table.current:
+            return
+            
+        keyword = stats_search_input.current.value.strip()
+        logger.debug(f"Searching database with keyword: '{keyword}'")
+        
+        if stats_status_text.current:
+            stats_status_text.current.value = "Searching..."
+            stats_status_text.current.color = "#3B82F6"
+            stats_status_text.current.update()
+            
+        # Perform query
+        import sqlite3
+        if not os.path.exists(DB_PATH):
+            rows = []
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                if keyword:
+                    cursor.execute(
+                        """SELECT filename, chat_name, file_size, downloaded_at, chat_id 
+                           FROM archive 
+                           WHERE filename LIKE ? OR caption LIKE ? OR chat_name LIKE ?
+                           ORDER BY downloaded_at DESC LIMIT 100""",
+                        (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%")
+                    )
+                else:
+                    cursor.execute(
+                        """SELECT filename, chat_name, file_size, downloaded_at, chat_id 
+                           FROM archive 
+                           ORDER BY downloaded_at DESC LIMIT 100"""
+                    )
+                rows = cursor.fetchall()
+            except Exception as ex:
+                logger.error(f"Error executing search query: {ex}")
+                rows = []
+            finally:
+                conn.close()
+                
+        # Build DataRows
+        table_rows = []
+        for r in rows:
+            filename, chat_name, size, downloaded_at, chat_id = r
+            chat_lbl = chat_name if chat_name else f"ID: {chat_id}"
+            
+            def make_open_handler(cid=chat_id, cname=chat_name, fname=filename):
+                async def handler(e):
+                    path = find_file_on_disk(cid, cname, fname)
+                    if path and os.path.exists(path):
+                        open_file_folder(path)
+                        page.snack_bar = ft.SnackBar(ft.Text(f"Opening folder for: {fname}"))
+                        page.snack_bar.open = True
+                    else:
+                        page.snack_bar = ft.SnackBar(ft.Text("File no longer exists on disk.", color="red"))
+                        page.snack_bar.open = True
+                    page.update()
+                return handler
+
+            table_rows.append(
+                ft.DataRow(cells=[
+                    ft.DataCell(
+                        ft.Row([
+                            ft.IconButton(
+                                icon=ft.Icons.FOLDER_OPEN,
+                                icon_color="#3B82F6",
+                                icon_size=16,
+                                tooltip="Open Containing Folder",
+                                on_click=make_open_handler()
+                            ),
+                            ft.Text(os.path.basename(filename), size=12, weight=ft.FontWeight.W_500, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+                        ], spacing=5)
+                    ),
+                    ft.DataCell(ft.Text(chat_lbl, size=12)),
+                    ft.DataCell(ft.Text(format_size(size), size=12)),
+                    ft.DataCell(ft.Text(downloaded_at if downloaded_at else "Unknown", size=12))
+                ])
+            )
+            
+        if not table_rows:
+            table_rows = [
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text("No downloaded files found in archive.")),
+                    ft.DataCell(ft.Text("")),
+                    ft.DataCell(ft.Text("")),
+                    ft.DataCell(ft.Text(""))
+                ])
+            ]
+            
+        stats_results_table.current.rows = table_rows
+        
+        if stats_status_text.current:
+            if not rows:
+                stats_status_text.current.value = "No matching downloaded files found."
+                stats_status_text.current.color = "#EF4444"
+            else:
+                count_lbl = f"Found {len(rows)} matching file(s)"
+                if len(rows) == 100:
+                    count_lbl += " (showing top 100)"
+                stats_status_text.current.value = count_lbl
+                stats_status_text.current.color = "#10B981"
+            stats_status_text.current.update()
+            
+        stats_results_table.current.update()
+
     def build_stats_view():
         logger.debug("Building build_stats_view controls...")
+        
+        stats = load_statistics_data()
+        total_files = stats["total_files"]
+        total_size = stats["total_size"]
+        avg_size = stats["avg_size"]
+        media_breakdown = stats["media_breakdown"]
+        top_chats = stats["top_chats"]
+        largest_files = stats["largest_files"]
+        
+        # Classify and compute type sizes/counts
+        video_size = 0
+        photo_size = 0
+        doc_size = 0
+        other_size = 0
+        video_count = 0
+        photo_count = 0
+        doc_count = 0
+        other_count = 0
+        
+        for mtype, count, size_bytes in media_breakdown:
+            size_bytes = size_bytes or 0
+            mtype_lower = (mtype or "unknown").lower()
+            if "video" in mtype_lower:
+                video_size += size_bytes
+                video_count += count
+            elif "photo" in mtype_lower or "image" in mtype_lower:
+                photo_size += size_bytes
+                photo_count += count
+            elif "doc" in mtype_lower or "document" in mtype_lower:
+                doc_size += size_bytes
+                doc_count += count
+            else:
+                other_size += size_bytes
+                other_count += count
+                
+        video_pct = (video_size / total_size * 100) if total_size > 0 else 0
+        photo_pct = (photo_size / total_size * 100) if total_size > 0 else 0
+        doc_pct = (doc_size / total_size * 100) if total_size > 0 else 0
+        other_pct = (other_size / total_size * 100) if total_size > 0 else 0
+        
+        # Build Media breakdown items
+        breakdown_items = []
+        if total_size == 0:
+            breakdown_items.append(ft.Text("No media breakdown available", italic=True, size=11, color="#9CA3AF"))
+        else:
+            if video_size > 0:
+                breakdown_items.append(
+                    ft.Row([
+                        ft.Icon(ft.Icons.CIRCLE, color="#10B981", size=8),
+                        ft.Text("Video", size=11, weight=ft.FontWeight.W_500, width=70),
+                        ft.Text(f": {format_size(video_size)} ({video_pct:.0f}%)", size=11, color="#9CA3AF")
+                    ], spacing=5)
+                )
+            if photo_size > 0:
+                breakdown_items.append(
+                    ft.Row([
+                        ft.Icon(ft.Icons.CIRCLE, color="#EAB308", size=8),
+                        ft.Text("Photos", size=11, weight=ft.FontWeight.W_500, width=70),
+                        ft.Text(f": {format_size(photo_size)} ({photo_pct:.0f}%)", size=11, color="#9CA3AF")
+                    ], spacing=5)
+                )
+            if doc_size > 0:
+                breakdown_items.append(
+                    ft.Row([
+                        ft.Icon(ft.Icons.CIRCLE, color="#8B5CF6", size=8),
+                        ft.Text("Documents", size=11, weight=ft.FontWeight.W_500, width=70),
+                        ft.Text(f": {format_size(doc_size)} ({doc_pct:.0f}%)", size=11, color="#9CA3AF")
+                    ], spacing=5)
+                )
+            if other_size > 0:
+                breakdown_items.append(
+                    ft.Row([
+                        ft.Icon(ft.Icons.CIRCLE, color="#EF4444", size=8),
+                        ft.Text("Others", size=11, weight=ft.FontWeight.W_500, width=70),
+                        ft.Text(f": {format_size(other_size)} ({other_pct:.0f}%)", size=11, color="#9CA3AF")
+                    ], spacing=5)
+                )
+                
+        # Build multi-color stacked bar
+        bar_segments = []
+        if total_size > 0:
+            if video_size > 0:
+                bar_segments.append(ft.Container(bgcolor="#10B981", expand=max(1, int(video_size / total_size * 100)), tooltip=f"Video: {video_pct:.0f}%"))
+            if photo_size > 0:
+                bar_segments.append(ft.Container(bgcolor="#EAB308", expand=max(1, int(photo_size / total_size * 100)), tooltip=f"Photos: {photo_pct:.0f}%"))
+            if doc_size > 0:
+                bar_segments.append(ft.Container(bgcolor="#8B5CF6", expand=max(1, int(doc_size / total_size * 100)), tooltip=f"Documents: {doc_pct:.0f}%"))
+            if other_size > 0:
+                bar_segments.append(ft.Container(bgcolor="#EF4444", expand=max(1, int(other_size / total_size * 100)), tooltip=f"Others: {other_pct:.0f}%"))
+                
+        if not bar_segments:
+            bar_segments.append(ft.Container(bgcolor="#374151", expand=True))
+            
+        stacked_bar = ft.Container(
+            content=ft.Row(bar_segments, spacing=0),
+            border_radius=4,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            height=8
+        )
+                
+        # Build Top chats items
+        top_chats_items = []
+        if not top_chats:
+            top_chats_items.append(ft.Text("No chat metrics available", italic=True, size=12, color="#9CA3AF"))
+        else:
+            for chat, count, size_bytes in top_chats:
+                chat_name = chat if chat else "Direct Messages/Unknown"
+                top_chats_items.append(
+                    ft.Row([
+                        ft.Row([
+                            ft.Icon(ft.Icons.CHAT_BUBBLE_OUTLINE, size=12, color="#10B981"),
+                            ft.Text(chat_name, size=12, weight=ft.FontWeight.W_500, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, width=110)
+                        ], spacing=5),
+                        ft.Text(f"{format_size(size_bytes or 0)} ({count} files)", size=12, color="#9CA3AF")
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+                )
+                
+        # Build Largest files items
+        largest_files_items = []
+        if not largest_files:
+            largest_files_items.append(ft.Text("No archived files found on disk", italic=True, size=12, color="#9CA3AF"))
+        else:
+            for filename, size_bytes, chat, chat_id in largest_files:
+                chat_name = chat if chat else "Unknown"
+                
+                def make_open_largest_handler(cid=chat_id, cname=chat_name, fname=filename):
+                    async def handler(e):
+                        path = find_file_on_disk(cid, cname, fname)
+                        if path and os.path.exists(path):
+                            open_file_folder(path)
+                            page.snack_bar = ft.SnackBar(ft.Text(f"Opening folder for: {fname}"))
+                            page.snack_bar.open = True
+                        else:
+                            page.snack_bar = ft.SnackBar(ft.Text("File no longer exists on disk.", color="red"))
+                            page.snack_bar.open = True
+                        page.update()
+                    return handler
+
+                largest_files_items.append(
+                    ft.Row([
+                        ft.Row([
+                            ft.IconButton(
+                                icon=ft.Icons.FOLDER_OPEN,
+                                icon_color="#A78BFA",
+                                icon_size=14,
+                                tooltip="Open Containing Folder",
+                                on_click=make_open_largest_handler()
+                            ),
+                            ft.Text(os.path.basename(filename), size=11, overflow=ft.TextOverflow.ELLIPSIS, max_lines=2, width=130)
+                        ], spacing=5),
+                        ft.Text(format_size(size_bytes or 0), size=11, color="#9CA3AF")
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+                )
+
+        # Initial search results (recent 20 downloads)
+        import sqlite3
+        initial_rows = []
+        if os.path.exists(DB_PATH):
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """SELECT filename, chat_name, file_size, downloaded_at, chat_id 
+                       FROM archive 
+                       ORDER BY downloaded_at DESC LIMIT 20"""
+                )
+                initial_rows = cursor.fetchall()
+            except Exception as ex:
+                logger.error(f"Error querying initial search: {ex}")
+            finally:
+                conn.close()
+                
+        table_rows = []
+        for r in initial_rows:
+            filename, chat_name, size, downloaded_at, chat_id = r
+            chat_lbl = chat_name if chat_name else f"ID: {chat_id}"
+            
+            def make_open_handler(cid=chat_id, cname=chat_name, fname=filename):
+                async def handler(e):
+                    path = find_file_on_disk(cid, cname, fname)
+                    if path and os.path.exists(path):
+                        open_file_folder(path)
+                        page.snack_bar = ft.SnackBar(ft.Text(f"Opening folder for: {fname}"))
+                        page.snack_bar.open = True
+                    else:
+                        page.snack_bar = ft.SnackBar(ft.Text("File no longer exists on disk.", color="red"))
+                        page.snack_bar.open = True
+                    page.update()
+                return handler
+
+            table_rows.append(
+                ft.DataRow(cells=[
+                    ft.DataCell(
+                        ft.Row([
+                            ft.IconButton(
+                                icon=ft.Icons.FOLDER_OPEN,
+                                icon_color="#3B82F6",
+                                icon_size=16,
+                                tooltip="Open Containing Folder",
+                                on_click=make_open_handler()
+                            ),
+                            ft.Text(os.path.basename(filename), size=12, weight=ft.FontWeight.W_500, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+                        ], spacing=5)
+                    ),
+                    ft.DataCell(ft.Text(chat_lbl, size=12)),
+                    ft.DataCell(ft.Text(format_size(size), size=12)),
+                    ft.DataCell(ft.Text(downloaded_at if downloaded_at else "Unknown", size=12))
+                ])
+            )
+            
+        if not table_rows:
+            table_rows = [
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text("No downloaded files found in archive.")),
+                    ft.DataCell(ft.Text("")),
+                    ft.DataCell(ft.Text("")),
+                    ft.DataCell(ft.Text(""))
+                ])
+            ]
+            
         return [
                 ft.Text("History & Statistics Dashboard", theme_style=ft.TextThemeStyle.HEADLINE_MEDIUM, weight=ft.FontWeight.BOLD, color="#3B82F6"),
                 ft.Text("Search downloaded history archives or check storage and chat distribution metrics.", color="#9CA3AF"),
                 ft.Divider(height=10, color="#1F2937"),
                 
-                # Storage Metrics Card
+                # Three-Column Grid Details Layout (Total Height: 290px)
                 ft.Row([
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Total Storage Used", size=14, color="#9CA3AF"),
-                            ft.Text("1.42 GB", size=24, weight=ft.FontWeight.BOLD, color="#3B82F6"),
-                            ft.ProgressBar(value=0.2, color="#3B82F6", bgcolor="#1F2937")
-                        ], spacing=10),
-                        bgcolor="#1A1A1E",
-                        padding=20,
-                        border_radius=12,
-                        border=ft.Border.all(1, "#374151"),
-                        expand=True
-                    ),
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("Total Files Archived", size=14, color="#9CA3AF"),
-                            ft.Text("32 files", size=24, weight=ft.FontWeight.BOLD, color="#10B981"),
-                            ft.ProgressBar(value=0.1, color="#10B981", bgcolor="#1F2937")
-                        ], spacing=10),
-                        bgcolor="#1A1A1E",
-                        padding=20,
-                        border_radius=12,
-                        border=ft.Border.all(1, "#374151"),
-                        expand=True
-                    ),
-                ], spacing=20),
+                    # COLUMN 1: Left metrics cards (Total Storage, Total Files, Average Size)
+                    ft.Column([
+                        # Card 1: Total Storage Used
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Total Storage Used:", size=20, color="#9CA3AF", weight=ft.FontWeight.BOLD),
+                                ft.Text(format_size(total_size), ref=stats_total_storage_text, size=20, weight=ft.FontWeight.BOLD, color="#3B82F6"),
+                            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        ),
+                        # Card 2: Total Files
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Total Files:", size=20, color="#9CA3AF", weight=ft.FontWeight.BOLD),
+                                ft.Text(f"{total_files} files", ref=stats_total_files_text, size=20, weight=ft.FontWeight.BOLD, color="#10B981"),
+                            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        ),
+                        # Card 3: Average File size
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Average File size:", size=20, color="#9CA3AF", weight=ft.FontWeight.BOLD),
+                                ft.Text(format_size(avg_size), ref=stats_avg_size_text, size=20, weight=ft.FontWeight.BOLD, color="#EAB308"),
+                            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        ),
+                    ], spacing=10, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                    
+                    # COLUMN 2: Center (Media Type Distribution & Top Chat By Storage)
+                    ft.Column([
+                        # Media Type Distribution Card
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Media Type Distribution:", weight=ft.FontWeight.BOLD, size=16, color="#10B981"),
+                                ft.Column(breakdown_items, spacing=4, ref=stats_breakdown_col),
+                                ft.Container(height=2),
+                                stacked_bar
+                            ], spacing=6),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        ),
+                        # Top Chat By Storage Card
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Top Chat By Storage:", weight=ft.FontWeight.BOLD, size=16, color="#EAB308"),
+                                ft.Column(top_chats_items, spacing=4, ref=stats_chats_col)
+                            ], spacing=6),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        )
+                    ], spacing=10, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                    
+                    # COLUMN 3: Right (Large Files Card)
+                    ft.Column([
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Large Files:", weight=ft.FontWeight.BOLD, size=16, color="#A78BFA"),
+                                ft.Column(largest_files_items, spacing=5, ref=stats_largest_col)
+                            ], spacing=6),
+                            bgcolor="#1A1A1E",
+                            padding=12,
+                            border_radius=8,
+                            border=ft.Border.all(1, "#374151"),
+                            expand=True
+                        )
+                    ], spacing=10, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+                ], spacing=15, height=290),
                 
-                # History Search Card
+                # Bottom: Search Files Card
                 ft.Container(
                     content=ft.Column([
-                        ft.Row([ft.Icon(ft.Icons.SEARCH, color="#3B82F6"), ft.Text("Search Library Archives", weight=ft.FontWeight.BOLD, size=16)]),
                         ft.Row([
-                            ft.TextField(label="Keyword / Filename search", border_color="#374151", expand=True, disabled=True, value="Database loading..."),
-                            ft.IconButton(ft.Icons.SEARCH, icon_color="#3B82F6", disabled=True)
-                        ], spacing=15),
-                        ft.DataTable(
-                            columns=[
-                                ft.DataColumn(ft.Text("Filename")),
-                                ft.DataColumn(ft.Text("Chat")),
-                                ft.DataColumn(ft.Text("Size")),
-                            ],
-                            rows=[
-                                ft.DataRow(cells=[
-                                    ft.DataCell(ft.Text("Database results will render here")),
-                                    ft.DataCell(ft.Text("Sync active")),
-                                    ft.DataCell(ft.Text("0 B")),
-                                ])
-                            ]
+                            ft.Row([ft.Icon(ft.Icons.SEARCH, color="#3B82F6", size=18), ft.Text("Search Files", weight=ft.FontWeight.BOLD, size=14)]),
+                            ft.Text("Showing recent downloads", ref=stats_status_text, size=11, color="#9CA3AF")
+                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        ft.Row([
+                            ft.TextField(
+                                ref=stats_search_input,
+                                label="Search by filename, caption, or chat name",
+                                border_color="#374151",
+                                expand=True,
+                                height=38,
+                                content_padding=10,
+                                on_submit=lambda e: page.run_task(handle_stats_search)
+                            ),
+                            ft.IconButton(
+                                ref=stats_search_button,
+                                icon=ft.Icons.SEARCH,
+                                icon_color="#3B82F6",
+                                on_click=lambda e: page.run_task(handle_stats_search)
+                            )
+                        ], spacing=10),
+                        
+                        # DataTable container
+                        ft.Container(
+                            content=ft.Column([
+                                ft.DataTable(
+                                    ref=stats_results_table,
+                                    columns=[
+                                        ft.DataColumn(ft.Text("Filename", weight=ft.FontWeight.BOLD, color="#9CA3AF")),
+                                        ft.DataColumn(ft.Text("Chat", weight=ft.FontWeight.BOLD, color="#9CA3AF")),
+                                        ft.DataColumn(ft.Text("Size", weight=ft.FontWeight.BOLD, color="#9CA3AF")),
+                                        ft.DataColumn(ft.Text("Downloaded At", weight=ft.FontWeight.BOLD, color="#9CA3AF")),
+                                    ],
+                                    rows=table_rows,
+                                    column_spacing=50
+                                )
+                            ], scroll=ft.ScrollMode.AUTO),
+                            height=160
                         )
-                    ], spacing=15),
+                    ], spacing=10),
                     bgcolor="#1A1A1E",
-                    padding=20,
-                    border_radius=12,
+                    padding=12,
+                    border_radius=8,
                     border=ft.Border.all(1, "#374151")
                 )
         ]
@@ -1652,22 +2184,90 @@ async def main(page: ft.Page):
         page.update()
         
         current_cfg = get_config()
-        try:
-            current_cfg["api_id"] = int(settings_api_id.current.value.strip())
-        except ValueError:
-            settings_status.current.value = "Error: API ID must be a valid integer."
-            settings_status.current.color = "red"
-            page.update()
-            return
+        
+        # Handle optional API ID & Hash without erroring if blank or masked
+        raw_api_id = settings_api_id.current.value.strip() if (settings_api_id and settings_api_id.current and settings_api_id.current.value) else ""
+        if raw_api_id and raw_api_id != "*****":
+            try:
+                current_cfg["api_id"] = int(raw_api_id)
+            except ValueError:
+                pass
+                
+        raw_api_hash = settings_api_hash.current.value.strip() if (settings_api_hash and settings_api_hash.current and settings_api_hash.current.value) else ""
+        if raw_api_hash and raw_api_hash != "*****":
+            current_cfg["api_hash"] = raw_api_hash
             
-        current_cfg["api_hash"] = settings_api_hash.current.value.strip()
         current_cfg["download_dir"] = settings_download_dir.current.value.strip()
         
         try:
-            current_cfg["speed_limit_kb"] = int(settings_speed_limit.current.value.strip())
+            speed_val = int(settings_speed_limit.current.value.strip())
+            current_cfg["max_download_speed_kbps"] = speed_val
+            current_cfg["speed_limit_kb"] = speed_val
         except ValueError:
+            current_cfg["max_download_speed_kbps"] = 0
             current_cfg["speed_limit_kb"] = 0
             
+        try:
+            current_cfg["chunk_size_kb"] = int(settings_chunk_size.current.value.strip())
+        except ValueError:
+            current_cfg["chunk_size_kb"] = 1024
+            
+        try:
+            current_cfg["max_concurrent_downloads"] = int(settings_max_concurrent.current.value.strip())
+        except ValueError:
+            current_cfg["max_concurrent_downloads"] = 3
+            
+        current_cfg["file_name_template"] = settings_filename_template.current.value.strip()
+        
+        try:
+            current_cfg["filter_min_size_mb"] = float(settings_min_size.current.value.strip())
+        except ValueError:
+            current_cfg["filter_min_size_mb"] = 0.0
+            
+        try:
+            current_cfg["filter_max_size_mb"] = float(settings_max_size.current.value.strip())
+        except ValueError:
+            current_cfg["filter_max_size_mb"] = 0.0
+            
+        current_cfg["filter_after_date"] = settings_after_date.current.value.strip()
+        current_cfg["filter_before_date"] = settings_before_date.current.value.strip()
+        current_cfg["filter_filename_regex"] = settings_filename_regex.current.value.strip()
+        current_cfg["filter_caption_regex"] = settings_caption_regex.current.value.strip()
+        
+        exts_str = settings_allowed_extensions.current.value.strip()
+        if exts_str:
+            current_cfg["filter_allowed_extensions"] = [x.strip().lower() for x in exts_str.split(",") if x.strip()]
+        else:
+            current_cfg["filter_allowed_extensions"] = []
+            
+        m_types = []
+        if settings_media_photo.current.value:
+            m_types.append("photo")
+        if settings_media_video.current.value:
+            m_types.append("video")
+        if settings_media_document.current.value:
+            m_types.append("document")
+        if settings_media_sticker.current.value:
+            m_types.append("sticker")
+        current_cfg["media_types"] = m_types
+        
+        current_cfg["monitor_date_organization"] = settings_monitor_date_org.current.value
+        current_cfg["monitor_bot_session_grouping"] = settings_monitor_session_grouping.current.value
+        
+        try:
+            current_cfg["monitor_bot_session_gap_seconds"] = int(settings_monitor_session_gap.current.value.strip())
+        except ValueError:
+            current_cfg["monitor_bot_session_gap_seconds"] = 15
+            
+        current_cfg["enable_gallery"] = settings_gallery_enabled.current.value
+        current_cfg["cloud_upload_enabled"] = settings_cloud_enabled.current.value
+        current_cfg["cloud_delete_local_after_upload"] = settings_cloud_delete_local.current.value
+        current_cfg["cloud_rclone_remote"] = settings_cloud_rclone_remote.current.value.strip()
+        current_cfg["cloud_remote_path"] = settings_cloud_remote_path.current.value.strip()
+        
+        current_cfg["tg_mirror_enabled"] = settings_mirror_enabled.current.value
+        current_cfg["tg_mirror_target"] = settings_mirror_target.current.value.strip()
+        
         if save_config(current_cfg):
             settings_status.current.value = "Success: Settings saved successfully!"
             settings_status.current.color = "#10B981"
@@ -1786,99 +2386,211 @@ async def main(page: ft.Page):
         content_lv.controls = build_settings_view()
         page.update()
 
+    async def handle_logout(e=None):
+        global client
+        logger.info("Log Out triggered. Disconnecting Telethon client and removing session file...")
+        try:
+            if client:
+                await client.disconnect()
+                client = None
+        except Exception as ex:
+            logger.error(f"Error disconnecting client on logout: {ex}")
+            
+        session_file = os.path.join(PROJECT_ROOT, 'telegram_dl_session.session')
+        session_journal = os.path.join(PROJECT_ROOT, 'telegram_dl_session.session-journal')
+        
+        for fpath in [session_file, session_journal]:
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                    logger.info(f"Removed session file: {fpath}")
+                except Exception as ex:
+                    logger.error(f"Could not remove session file {fpath}: {ex}")
+                    
+        # Reset auth inputs
+        if auth_code.current:
+            auth_code.current.value = ""
+            auth_code.current.disabled = True
+        if auth_password.current:
+            auth_password.current.value = ""
+            auth_password.current.disabled = True
+        if auth_status.current:
+            auth_status.current.value = "Logged out successfully. Session file deleted. Please sign in again."
+            auth_status.current.color = "#F59E0B"
+            
+        # Switch back to auth onboarding view
+        auth_panel.content = build_auth_view()
+        page.controls.clear()
+        page.add(auth_panel)
+        page.update()
+
     def build_settings_view():
         logger.debug("Building build_settings_view controls...")
         
-        # Read monitored chats from config
+        # Read config
         config_data = get_config()
-        monitored_list = config_data.get("monitored_chats", [])
+        media_list = config_data.get("media_types", ["photo", "video", "document", "sticker"])
+        allowed_exts_str = ", ".join(config_data.get("filter_allowed_extensions", []))
         
-        monitored_rows = []
-        for c in monitored_list:
-            c_id = c.get("id") if isinstance(c, dict) else c
-            c_title = c.get("title") if isinstance(c, dict) else str(c)
-            
-            monitored_rows.append(
-                ft.Row([
-                    ft.Icon(ft.Icons.CHAT_BUBBLE_OUTLINE, color="#10B981", size=18),
-                    ft.Text(f"{c_title} (ID: {c_id})", color="#E5E7EB", expand=True),
-                    ft.IconButton(
-                        icon=ft.Icons.DELETE_OUTLINE,
-                        icon_color="red",
-                        tooltip="Remove from Monitoring",
-                        on_click=lambda e, chat_id=c_id: handle_remove_monitored_chat(chat_id)
-                    )
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
-            )
-            
         return [
                 ft.Text("Settings & Configurations", theme_style=ft.TextThemeStyle.HEADLINE_MEDIUM, weight=ft.FontWeight.BOLD, color="#F59E0B"),
-                ft.Text("Modify download parameters, API credentials, and directories.", color="#9CA3AF"),
+                ft.Text("Modify download parameters, API credentials, directories, filters, backups, and mirrors.", color="#9CA3AF"),
                 ft.Divider(height=10, color="#1F2937"),
                 
-                # API Credentials Section
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([ft.Icon(ft.Icons.KEY, color="#F59E0B"), ft.Text("API Credentials", weight=ft.FontWeight.BOLD, size=16)]),
-                        ft.TextField(ref=settings_api_id, label="API ID", value=str(config_data.get("api_id", "")), border_color="#374151"),
-                        ft.TextField(ref=settings_api_hash, label="API Hash", value=str(config_data.get("api_hash", "")), password=True, border_color="#374151"),
-                    ], spacing=15),
-                    bgcolor="#1A1A1E",
-                    padding=20,
-                    border_radius=12,
-                    border=ft.Border.all(1, "#374151")
-                ),
+                # ROW 1: API & Credentials + Directories & File Naming
+                ft.Row([
+                    # Card 1: API Credentials & Mirroring
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.KEY, color="#F59E0B"), ft.Text("API Credentials & Mirroring", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.TextField(ref=settings_api_id, label="API ID (Configured)", value="*****" if config_data.get("api_id") else "", hint_text="Enter new API ID to update", border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_api_hash, label="API Hash (Configured)", value="*****" if config_data.get("api_hash") else "", password=True, hint_text="Enter new API Hash to update", border_color="#374151", height=38, content_padding=10),
+                            ft.Checkbox(ref=settings_mirror_enabled, label="Mirror Downloads to Telegram", value=bool(config_data.get("tg_mirror_enabled", False))),
+                            ft.TextField(ref=settings_mirror_target, label="Telegram Target Channel/ID", value=str(config_data.get("tg_mirror_target", "")), border_color="#374151", height=38, content_padding=10),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    ),
+                    # Card 2: Directories & File Naming
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.FOLDER, color="#F59E0B"), ft.Text("Directories & File Naming", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.TextField(ref=settings_download_dir, label="Downloads Folder Path", value=str(config_data.get("download_dir", "./downloads")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_filename_template, label="Filename Naming Template", value=str(config_data.get("file_name_template", "{chat_id}_{message_id}_{date}_{filename}")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_cloud_rclone_remote, label="Rclone Remote Name", value=str(config_data.get("cloud_rclone_remote", "gdrive")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_cloud_remote_path, label="Rclone Remote Path", value=str(config_data.get("cloud_remote_path", "telegram-dl/backups")), border_color="#374151", height=38, content_padding=10),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    )
+                ], spacing=15, height=270, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
                 
-                # Directories and limits Section
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([ft.Icon(ft.Icons.FOLDER, color="#F59E0B"), ft.Text("Download Directory & Speed", weight=ft.FontWeight.BOLD, size=16)]),
-                        ft.TextField(ref=settings_download_dir, label="Downloads Folder Path", value=str(config_data.get("download_dir", "./downloads")), border_color="#374151"),
-                        ft.TextField(ref=settings_speed_limit, label="Max Speed Limit (KB/s - 0 for Unlimited)", value=str(config_data.get("speed_limit_kb", "0")), border_color="#374151"),
-                        ft.Row([
-                            ft.Button("Save Configurations", bgcolor="#F59E0B", color="white", on_click=lambda e: page.run_task(handle_save_settings)),
-                            ft.Text("", ref=settings_status, weight=ft.FontWeight.BOLD)
-                        ], spacing=15)
-                    ], spacing=15),
-                    bgcolor="#1A1A1E",
-                    padding=20,
-                    border_radius=12,
-                    border=ft.Border.all(1, "#374151")
-                ),
-
-                # Monitored Chats Section
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([ft.Icon(ft.Icons.REMOVE_RED_EYE, color="#F59E0B"), ft.Text("Manage Monitored Chats", weight=ft.FontWeight.BOLD, size=16)]),
-                        
-                        # Add a new chat to monitor
-                        ft.Row([
-                            ft.TextField(
-                                ref=settings_add_monitored,
-                                label="Add Chat (Username, Numeric ID, or Invite Link)",
-                                hint_text="e.g. channel_username or -100123456789",
+                # ROW 2: Speed & Limits + Media Filters
+                ft.Row([
+                    # Card 3: Performance & Speed Limits
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.SPEED, color="#F59E0B"), ft.Text("Limits & Performance", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.TextField(ref=settings_speed_limit, label="Max Speed Limit (KB/s - 0 for Unlimited)", value=str(config_data.get("max_download_speed_kbps", config_data.get("speed_limit_kb", "0"))), border_color="#374151", height=38, content_padding=10),
+                            ft.Dropdown(
+                                ref=settings_chunk_size,
+                                label="Download Chunk Size (KB)",
+                                options=[
+                                    ft.dropdown.Option("256", "256 KB"),
+                                    ft.dropdown.Option("512", "512 KB"),
+                                    ft.dropdown.Option("1024", "1024 KB (1 MB)"),
+                                    ft.dropdown.Option("2048", "2048 KB (2 MB)"),
+                                    ft.dropdown.Option("4096", "4096 KB (4 MB)"),
+                                ],
+                                value=str(config_data.get("chunk_size_kb", "1024")),
                                 border_color="#374151",
-                                expand=True
+                                height=38
                             ),
-                            ft.ElevatedButton(
-                                "Add to Monitor",
-                                bgcolor="#F59E0B",
-                                color="white",
-                                on_click=lambda e: page.run_task(handle_add_monitored_chat)
-                            )
-                        ], spacing=10),
-                        
-                        # Status message
-                        ft.Text("", ref=settings_monitored_status, weight=ft.FontWeight.BOLD),
-                        
-                        # Monitored list
-                        ft.Text("Monitored Chats List:", weight=ft.FontWeight.BOLD, size=14, color="#9CA3AF"),
-                        ft.Column(monitored_rows, spacing=5) if monitored_rows else ft.Text("No chats currently monitored.", color="#6B7280", italic=True)
+                            ft.TextField(ref=settings_max_concurrent, label="Max Parallel Downloads", value=str(config_data.get("max_concurrent_downloads", "3")), border_color="#374151", height=38, content_padding=10),
+                            ft.Dropdown(
+                                ref=settings_monitor_date_org,
+                                label="Date Subfolder Organization",
+                                options=[
+                                    ft.dropdown.Option("none"),
+                                    ft.dropdown.Option("daily"),
+                                    ft.dropdown.Option("monthly"),
+                                ],
+                                value=config_data.get("monitor_date_organization", "none"),
+                                border_color="#374151",
+                                height=38
+                            ),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    ),
+                    # Card 4: Media Types & Extensions Filter
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.FILTER_LIST, color="#F59E0B"), ft.Text("Media & Size Filters", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.Row([
+                                ft.Checkbox(ref=settings_media_photo, label="Photos", value="photo" in media_list),
+                                ft.Checkbox(ref=settings_media_video, label="Videos", value="video" in media_list),
+                                ft.Checkbox(ref=settings_media_document, label="Docs", value="document" in media_list),
+                                ft.Checkbox(ref=settings_media_sticker, label="Stickers", value="sticker" in media_list),
+                            ], spacing=15),
+                            ft.TextField(ref=settings_min_size, label="Minimum File Size (MB)", value=str(config_data.get("filter_min_size_mb", "0")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_max_size, label="Maximum File Size (MB)", value=str(config_data.get("filter_max_size_mb", "0")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_allowed_extensions, label="Allowed Extensions (Comma separated)", value=allowed_exts_str, border_color="#374151", height=38, content_padding=10),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    )
+                ], spacing=15, height=270, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
+                
+                # ROW 3: Date & Regex Matching + Monitor & Cloud Storage
+                ft.Row([
+                    # Card 5: Date & Text Matching
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.DATE_RANGE, color="#F59E0B"), ft.Text("Date & Text Matching", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.TextField(ref=settings_after_date, label="Only After Date (YYYY-MM-DD)", value=str(config_data.get("filter_after_date", "")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_before_date, label="Only Before Date (YYYY-MM-DD)", value=str(config_data.get("filter_before_date", "")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_filename_regex, label="Filename Regex Pattern", value=str(config_data.get("filter_filename_regex", "")), border_color="#374151", height=38, content_padding=10),
+                            ft.TextField(ref=settings_caption_regex, label="Caption Regex Pattern", value=str(config_data.get("filter_caption_regex", "")), border_color="#374151", height=38, content_padding=10),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    ),
+                    # Card 6: Live Monitor & Cloud Backups
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.Icons.CLOUD_UPLOAD, color="#F59E0B"), ft.Text("Monitor & Cloud Storage", weight=ft.FontWeight.BOLD, size=15)]),
+                            ft.Checkbox(ref=settings_monitor_session_grouping, label="Group Bot Session files", value=bool(config_data.get("monitor_bot_session_grouping", True))),
+                            ft.TextField(ref=settings_monitor_session_gap, label="Session Gap Seconds", value=str(config_data.get("monitor_bot_session_gap_seconds", "15")), border_color="#374151", height=38, content_padding=10),
+                            ft.Checkbox(ref=settings_gallery_enabled, label="Enable HTML Gallery Generator", value=bool(config_data.get("enable_gallery", False))),
+                            ft.Row([
+                                ft.Checkbox(ref=settings_cloud_enabled, label="Auto Cloud Upload", value=bool(config_data.get("cloud_upload_enabled", False))),
+                                ft.Checkbox(ref=settings_cloud_delete_local, label="Delete local after upload", value=bool(config_data.get("cloud_delete_local_after_upload", False))),
+                            ], spacing=15),
+                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                        bgcolor="#1A1A1E",
+                        padding=15,
+                        border_radius=10,
+                        border=ft.Border.all(1, "#374151"),
+                        expand=True
+                    )
+                ], spacing=15, height=270, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
+                
+                # Bottom Action Save & Log Out panel
+                ft.Container(
+                    content=ft.Row([
+                        ft.Button(
+                            "Save All Configurations",
+                            bgcolor="#F59E0B",
+                            color="white",
+                            icon=ft.Icons.SAVE,
+                            on_click=lambda e: page.run_task(handle_save_settings)
+                        ),
+                        ft.Button(
+                            "Log Out & Delete Session",
+                            bgcolor="#EF4444",
+                            color="white",
+                            icon=ft.Icons.LOGOUT,
+                            on_click=lambda e: page.run_task(handle_logout)
+                        ),
+                        ft.Text("", ref=settings_status, weight=ft.FontWeight.BOLD)
                     ], spacing=15),
-                    bgcolor="#1A1A1E",
-                    padding=20,
-                    border_radius=12,
-                    border=ft.Border.all(1, "#374151")
+                    padding=5
                 )
         ]
 
