@@ -212,6 +212,7 @@ async def get_position_manager():
 class TqdmDownloadProgress:
     """Helper class to track download progress using tqdm with rate limiting."""
     gui_callback = None  # Class-level hook to receive progress updates in GUI: (filename, received, total)
+    is_canceled = False
 
     def __init__(self, filename, total_bytes, position=None):
         self.filename = filename
@@ -562,6 +563,9 @@ async def download_message_media(client: TelegramClient, message, chat_id, overr
                             request_size=512 * 1024, # 512KB chunks (Telegram maximum limit for speed)
                             file_size=file_size
                         ):
+                            if getattr(TqdmDownloadProgress, 'is_canceled', False):
+                                raise asyncio.CancelledError("Download cancelled by user.")
+                                
                             f_out.write(chunk)
                             chunk_len = len(chunk)
                             
@@ -649,6 +653,12 @@ async def download_message_media(client: TelegramClient, message, chat_id, overr
                 tqdm.write(f"\n⏳ \033[1;33m[FLOOD WAIT] Rate limited by Telegram. Must sleep for {e.seconds} seconds before retrying...\033[0m")
                 await asyncio.sleep(e.seconds)
                 progress = TqdmDownloadProgress(filename, file_size, position)
+            except asyncio.CancelledError:
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 progress.close()
                 if attempt == retry_count - 1:
@@ -658,6 +668,10 @@ async def download_message_media(client: TelegramClient, message, chat_id, overr
                 await asyncio.sleep(3)
                 progress = TqdmDownloadProgress(filename, file_size, position)
     finally:
+        try:
+            progress.close()
+        except Exception:
+            pass
         # Always release the position and semaphore
         await pos_mgr.release(position)
         sem.release()

@@ -87,6 +87,7 @@ async def main(page: ft.Page):
     scheduler_range_start_temp = None
     monitor_handler = None
     monitor_active = False
+    active_gui_monitor_tasks = set()
 
     def on_focus_field(e):
         nonlocal focused_textfield
@@ -890,8 +891,13 @@ async def main(page: ft.Page):
             log_to_monitor_feed(f"[SYSTEM] Starting Live Monitor Daemon for {len(chat_ids)} chats...")
             
             async def gui_new_message_callback(event):
+                if not monitor_active:
+                    return
                 if not event.message.media:
                     return
+                current_task = asyncio.current_task()
+                if current_task:
+                    active_gui_monitor_tasks.add(current_task)
                 try:
                     chat = await event.get_chat()
                     chat_title = getattr(chat, 'title', None)
@@ -918,12 +924,19 @@ async def main(page: ft.Page):
                             log_to_monitor_feed(f"   ↳ ✅ Downloaded: {os.path.basename(result)}")
                     else:
                         log_to_monitor_feed(f"   ↳ ❌ Failed: {result}")
+                except asyncio.CancelledError:
+                    log_to_monitor_feed(f"   ↳ ⏹️ Cancelled download for message {getattr(event.message, 'id', 'unknown')}")
+                    raise
                 except Exception as err:
                     log_to_monitor_feed(f"   ↳ ❌ Error: {str(err)}")
+                finally:
+                    if current_task:
+                        active_gui_monitor_tasks.discard(current_task)
                     
             try:
                 # Add Telethon event handler
-                monitor_handler = client.add_event_handler(gui_new_message_callback, events.NewMessage(chats=chat_ids))
+                client.add_event_handler(gui_new_message_callback, events.NewMessage(chats=chat_ids))
+                monitor_handler = gui_new_message_callback
                 monitor_active = True
                 
                 # Update UI elements
@@ -941,6 +954,7 @@ async def main(page: ft.Page):
                 log_to_monitor_feed(f"[ERROR] Failed to start daemon: {ex}")
         else:
             # Stop Live Monitoring
+            monitor_active = False
             if monitor_handler:
                 try:
                     client.remove_event_handler(monitor_handler)
@@ -948,7 +962,13 @@ async def main(page: ft.Page):
                     logger.error(f"Error removing monitor event handler: {ex}")
                 monitor_handler = None
             
-            monitor_active = False
+            # Cancel any active in-flight download tasks
+            if active_gui_monitor_tasks:
+                cancel_count = len(active_gui_monitor_tasks)
+                log_to_monitor_feed(f"[SYSTEM] Cancelling {cancel_count} active monitor download(s)...")
+                for t in list(active_gui_monitor_tasks):
+                    t.cancel()
+                active_gui_monitor_tasks.clear()
             
             # Update UI elements
             monitor_status_title.current.value = "Daemon Status: Stopped"

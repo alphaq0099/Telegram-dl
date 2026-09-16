@@ -43,13 +43,21 @@ def parse_telegram_link(link: str):
         
     return resolved_chat, message_id, topic_id
 
-def parse_chat_identifier(chat_input: str):
+def parse_chat_identifier(chat_input):
     """
     Parses a general chat input (could be a link, @username, or numeric ID).
     Returns a clean identifier (int or str) usable by Telethon.
     """
-    chat_input = chat_input.strip()
-    
+    if isinstance(chat_input, int):
+        return chat_input
+        
+    chat_input = str(chat_input).strip()
+    if chat_input.lstrip("-").isdigit():
+        try:
+            return int(chat_input)
+        except ValueError:
+            pass
+            
     # Check if it's a link first
     link_chat, _, _ = parse_telegram_link(chat_input)
     if link_chat is not None:

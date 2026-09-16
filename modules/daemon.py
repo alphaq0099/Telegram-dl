@@ -199,15 +199,58 @@ async def run_live_monitor(client, monitored_chats):
     print("\033[1;36m============================================================\033[0m")
     print("📡  \033[1;35m[LIVE MONITOR ACTIVE] - Watching chats for new media...\033[0m")
     print("\033[1;36m============================================================\033[0m")
-    print("👁️   Monitored:")
-    chat_ids = []
+    print("👁️   Resolving monitored chats...")
+    
+    resolved_entities = []
+    monitored_id_set = set()
+    
+    from telethon.utils import get_peer_id
+    
     for c in monitored_chats:
-        if isinstance(c, dict):
-            print(f"    - \033[1;32m{c.get('title') or c.get('id')}\033[0m")
-            chat_ids.append(c["id"])
-        else:
-            print(f"    - \033[1;32m{c}\033[0m")
-            chat_ids.append(c)
+        raw_id = c["id"] if isinstance(c, dict) else c
+        title = c.get("title") if isinstance(c, dict) else str(c)
+        
+        # Always register raw representations in our fallback set
+        monitored_id_set.add(raw_id)
+        monitored_id_set.add(str(raw_id))
+        if str(raw_id).lstrip("-").isdigit():
+            monitored_id_set.add(int(raw_id))
+            # Also register channel prefix versions
+            if not str(raw_id).startswith("-100"):
+                try:
+                    monitored_id_set.add(int(f"-100{raw_id}"))
+                except ValueError:
+                    pass
+        elif isinstance(raw_id, str):
+            monitored_id_set.add(raw_id.lower().lstrip("@"))
+            monitored_id_set.add(f"@{raw_id.lower().lstrip('@')}")
+
+        try:
+            entity = await resolve_chat_entity(client, raw_id)
+            if entity:
+                resolved_entities.append(entity)
+                entity_id = entity.id
+                monitored_id_set.add(entity_id)
+                monitored_id_set.add(str(entity_id))
+                
+                try:
+                    peer_id = get_peer_id(entity)
+                    monitored_id_set.add(peer_id)
+                    monitored_id_set.add(str(peer_id))
+                except Exception:
+                    pass
+                    
+                username = getattr(entity, 'username', None)
+                if username:
+                    monitored_id_set.add(username.lower())
+                    monitored_id_set.add(f"@{username.lower()}")
+                    
+                print(f"    - \033[1;32m{title}\033[0m [Ready]")
+            else:
+                print(f"    - \033[1;33m{title}\033[0m [Registered by ID]")
+        except Exception as e:
+            print(f"    - \033[1;33m{title}\033[0m [Registered: {e}]")
+            
     print("\033[1;30m------------------------------------------------------------\033[0m")
     
     # Read bot session settings for visual status heads-up
@@ -224,25 +267,61 @@ async def run_live_monitor(client, monitored_chats):
     print("\033[1;30m------------------------------------------------------------\033[0m")
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Listening for incoming messages...\n")
     
+    is_monitoring_active = True
+    active_download_tasks = set()
+
     async def new_message_callback(event):
-        if not event.message.media:
+        if not is_monitoring_active:
             return
             
+        current_task = asyncio.current_task()
+        if current_task:
+            active_download_tasks.add(current_task)
+            
         try:
-            chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', None)
-            if not chat_title:
-                first_name = getattr(chat, 'first_name', None)
-                last_name = getattr(chat, 'last_name', None)
-                if first_name:
-                    chat_title = f"{first_name} {last_name}".strip() if last_name else first_name
-                else:
-                    chat_title = getattr(chat, 'username', None)
-            if not chat_title:
-                chat_title = "Unknown Chat"
+            # Check if event is from our monitored chats
+            chat_id = event.chat_id
+            sender_id = getattr(event, 'sender_id', None)
+            
+            # Fast membership check against our comprehensive set
+            is_monitored = (
+                chat_id in monitored_id_set or 
+                str(chat_id) in monitored_id_set or
+                (sender_id and (sender_id in monitored_id_set or str(sender_id) in monitored_id_set))
+            )
+            
+            if not is_monitored and resolved_entities:
+                # Also check username if available
+                try:
+                    chat = await event.get_chat()
+                    uname = getattr(chat, 'username', None)
+                    if uname and (uname.lower() in monitored_id_set or f"@{uname.lower()}" in monitored_id_set):
+                        is_monitored = True
+                except Exception:
+                    pass
+                    
+            if not is_monitored and resolved_entities:
+                return
+
+            if not event.message or not event.message.media:
+                return
+                
+            try:
+                chat = await event.get_chat()
+                chat_title = getattr(chat, 'title', None)
+                if not chat_title:
+                    first_name = getattr(chat, 'first_name', None)
+                    last_name = getattr(chat, 'last_name', None)
+                    if first_name:
+                        chat_title = f"{first_name} {last_name}".strip() if last_name else first_name
+                    else:
+                        chat_title = getattr(chat, 'username', None)
+                if not chat_title:
+                    chat_title = "Unknown Chat"
+            except Exception:
+                chat_title = str(event.chat_id)
                 
             message = event.message
-            
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             tqdm.write(f"\n📥 [{timestamp}] [New Media] {chat_title}: Found media in message {message.id}")
             
@@ -256,11 +335,20 @@ async def run_live_monitor(client, monitored_chats):
                     tqdm.write(f"   ↳ ✅ Successfully downloaded: {os.path.basename(result)}")
             else:
                 tqdm.write(f"   ↳ ❌ Download failed: {result}")
+        except asyncio.CancelledError:
+            tqdm.write(f"   ↳ 🛑 Download cancelled (Monitor stopped).")
+            raise
         except Exception as err:
             tqdm.write(f"   ↳ ❌ Error processing message: {str(err)}")
+        finally:
+            if current_task:
+                active_download_tasks.discard(current_task)
 
-    # Add Telethon event handler
-    handler = client.add_event_handler(new_message_callback, events.NewMessage(chats=chat_ids))
+    # Add Telethon event handler (using resolved entities if available, otherwise catch all and filter)
+    if resolved_entities:
+        client.add_event_handler(new_message_callback, events.NewMessage(chats=resolved_entities))
+    else:
+        client.add_event_handler(new_message_callback, events.NewMessage())
     
     try:
         # Keep running until cancelled by user (Ctrl+C)
@@ -269,6 +357,22 @@ async def run_live_monitor(client, monitored_chats):
     except (asyncio.CancelledError, KeyboardInterrupt):
         print("\n🛑 \033[1;31mStopping Live Monitor...\033[0m")
     finally:
-        client.remove_event_handler(handler)
-        print("\033[1;32mEvent listener successfully removed.\033[0m")
-        await asyncio.sleep(2)
+        is_monitoring_active = False
+        try:
+            client.remove_event_handler(new_message_callback)
+            print("\033[1;32mEvent listener successfully removed.\033[0m")
+        except Exception:
+            pass
+            
+        # Cancel any in-progress download tasks so they don't continue in the background
+        if active_download_tasks:
+            print(f"🛑 Cancelling {len(active_download_tasks)} active in-progress download(s)...")
+            for t in list(active_download_tasks):
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.gather(*active_download_tasks, return_exceptions=True)
+            except Exception:
+                pass
+            active_download_tasks.clear()
+            print("\033[1;32mAll active downloads stopped.\033[0m")
