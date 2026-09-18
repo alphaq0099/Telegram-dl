@@ -66,7 +66,7 @@ async def run_duplicate_checker(custom_style):
         
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- DUPLICATE MEDIA CHECKER ---\033[0m\n")
         
         scan_choice = await questionary.select(

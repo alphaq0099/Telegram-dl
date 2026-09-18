@@ -105,7 +105,7 @@ async def handle_search_menu(custom_style):
         
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- HISTORY & STATISTICS ---\033[0m\n")
         
         choice = await questionary.select(
@@ -336,7 +336,7 @@ async def view_statistics(custom_style):
         return
         
     os.system('cls' if os.name == 'nt' else 'clear')
-    print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+    print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
     print("\033[1;35m--- DOWNLOAD STATISTICS DASHBOARD ---\033[0m\n")
     
     print(f"📊  {'Total Files Archived:'.ljust(25)} \033[1;32m{total_files:,}\033[0m")

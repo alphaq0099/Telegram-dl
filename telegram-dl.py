@@ -51,7 +51,7 @@ def format_media_types(types_list):
 def print_header():
     """Clears the console and prints the Telegram Downloader header."""
     os.system('cls' if os.name == 'nt' else 'clear')
-    print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+    print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
     
     # Read download dir and allowed types to show status
     config = get_config()
@@ -645,7 +645,7 @@ async def main():
                 pass
                 
             os.system('cls' if os.name == 'nt' else 'clear')
-            print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+            print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
             print("\033[1;35m--- SCHEDULER QUEUE RUN ---\033[0m\n")
             print("⏰ \033[1;36mScheduled time reached! Starting download queue...\033[0m\n")
             from modules.queue_manager import process_queue

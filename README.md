@@ -1,14 +1,15 @@
-# Telegram Downloader V3.8.5 (CLI) 🚀
+# Telegram Downloader V3.9.0 (CLI & Desktop GUI) 🚀
 
-An advanced, high-performance, asynchronous userbot-style Telegram media downloader built in Python using the **Telethon** MTProto library. 
+An advanced, high-performance, asynchronous userbot-style Telegram media downloader built in Python using the **Telethon** MTProto library and **Flet** GUI framework. 
 
-This downloader provides a sleek, modern keyboard-navigable terminal interface (TUI) to retrieve photos, videos, documents, audios, voice notes, and stickers from public and private groups, channels, chats, and bots.
+This downloader provides both a modern, keyboard-navigable terminal interface (TUI) and a sleek, modern desktop graphical user interface (GUI) to retrieve photos, videos, documents, audios, voice notes, and stickers from public and private groups, channels, chats, and bots.
 
 ---
 
-## 🌟 V3.8.5 Key Features
+## 🌟 V3.9.0 Key Features
 
-* **Portable & Zero-Setup Executable**: Compiles into a single standalone `.exe` (under 22MB). If no configuration is present, it dynamically prompts for Telegram API credentials and saves them to a self-healing `config.json` next to the executable. Path-persistence logic keeps your logins, database, and settings intact across directories.
+* **Modern Desktop GUI (Flet)**: A complete, dark-themed native desktop interface featuring 5 distinct tabs: Downloader (single, range, full chat), Scheduled Queue Manager, Live Monitor Daemon, Offline History & Statistics Search, and comprehensive Settings Configurator.
+* **Portable & Zero-Setup Executable**: Compiles into a single standalone `.exe`. If no configuration is present, it dynamically prompts for Telegram API credentials and saves them to a self-healing `config.json` next to the executable. Path-persistence logic keeps your logins, database, and settings intact across directories.
 * **Bypasses Save Restrictions**: Naturally bypasses Telegram's client-side copy/forwarding restrictions (e.g., *"Restrict saving content"* in private groups/channels) by directly requesting raw MTProto file chunks.
 * **Resumable Chunk Downloads**: Tracks `.part` temporary downloads on disk. If interrupted, it automatically truncates and resumes from the nearest **4KB boundary** (Telegram requirement). Uses maximum **512KB chunk sizes** to minimize network request latency, boosting download speeds by up to 4x.
 * **Scheduled Queue Manager**: 

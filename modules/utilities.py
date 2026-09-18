@@ -86,7 +86,7 @@ async def handle_utilities_menu(client, custom_style):
     """Sleek sub-menu to manage media utility tools."""
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- MEDIA & FILE UTILITIES ---\033[0m")
         
         config = get_config()
@@ -815,7 +815,7 @@ async def run_advanced_converters_interactive(config, custom_style):
         
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- ADVANCED MEDIA CONVERTERS ---\033[0m\n")
         
         choice = await questionary.select(

@@ -72,7 +72,7 @@ async def main(page: ft.Page):
     page.overlay.append(scheduler_time_picker)
     
     # Page Window Configuration
-    page.title = "Telegram Downloader & Media Manager"
+    page.title = "Telegram Downloader & Media Manager (v3.9.0)"
     page.theme_mode = ft.ThemeMode.DARK
     page.window.width = 1150
     page.window.height = 750

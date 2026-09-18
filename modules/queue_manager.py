@@ -112,7 +112,7 @@ async def handle_queue_menu(client, custom_style):
     """Sub-menu to manage scheduled downloads and download queue."""
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- SCHEDULED QUEUE MANAGER ---\033[0m")
         
         queue = load_queue()
@@ -189,7 +189,7 @@ async def handle_queue_menu(client, custom_style):
 async def add_job_interactive(custom_style):
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[1;36mTelegram Downloader (V3.8.5)\033[0m")
+        print("\033[1;36mTelegram Downloader (V3.9.0)\033[0m")
         print("\033[1;35m--- ADD JOB TO DOWNLOAD QUEUE ---\033[0m\n")
         
         # Display current queue stats inline
