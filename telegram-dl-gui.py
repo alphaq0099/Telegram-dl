@@ -27,14 +27,24 @@ from modules.queue_manager import load_queue, save_queue
 from utils.archive import DB_PATH
 from modules.search import find_file_on_disk, open_file_folder, format_size
 
+# Handle windowed execution where stdout/stderr are None
+is_windowed = sys.stdout is None
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
 # Setup logging to console and file
+log_handlers = [
+    logging.FileHandler(os.path.join(PROJECT_ROOT, 'gui_debug.log'), encoding='utf-8', mode='w')
+]
+if not is_windowed:
+    log_handlers.append(logging.StreamHandler(sys.stdout))
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(PROJECT_ROOT, 'gui_debug.log'), encoding='utf-8', mode='w')
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger("GUI_Debug")
 
